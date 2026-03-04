@@ -48,10 +48,15 @@ def _resolve_frame_path(path: str) -> str:
 
 
 def _candidate_npz_paths(pseudo_root: Path, segment: str, target_id: str) -> list[str]:
-    ids = [target_id]
+    """Generate tolerant NPZ filename candidates for padded/unpadded ids."""
+    ids: list[str] = [target_id]
     if target_id.isdigit():
-        ids.extend([str(int(target_id)), target_id.zfill(6)])
-    # dedupe preserve order
+        raw = str(int(target_id))
+        ids.append(raw)
+        # Common paddings seen in datasets: 3~6 digits
+        for w in (3, 4, 5, 6):
+            ids.append(raw.zfill(w))
+
     uniq: list[str] = []
     for x in ids:
         if x not in uniq:
