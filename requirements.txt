@@ -1,0 +1,7 @@
+torch
+numpy
+opencv-python
+onnx
+onnxruntime
+pytest
+tqdm
