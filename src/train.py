@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 import json
 from pathlib import Path
 
@@ -33,6 +34,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--resume", default="")
     p.add_argument("--strict", type=int, default=0)
     p.add_argument("--log_every", type=int, default=20)
+    p.add_argument("--devices", default="", help="comma-separated cuda device ids, e.g. 0,1,2,3")
     return p.parse_args()
 
 
@@ -56,17 +58,41 @@ def main() -> None:
     ds = FrameWindowDataset(specs, args.pseudo_root, strict=args.strict)
     dl = DataLoader(ds, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, collate_fn=kd_collate, pin_memory=True)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    use_cuda = torch.cuda.is_available()
+    if use_cuda and args.devices:
+        dev_ids = [int(x) for x in args.devices.split(",") if x.strip() != ""]
+        if not dev_ids:
+            dev_ids = list(range(torch.cuda.device_count()))
+    else:
+        dev_ids = list(range(torch.cuda.device_count())) if use_cuda else []
+
+    if use_cuda and dev_ids:
+        torch.cuda.set_device(dev_ids[0])
+        device = torch.device(f"cuda:{dev_ids[0]}")
+    else:
+        device = torch.device("cpu")
+
     model = StudentNet().to(device)
+    if use_cuda and len(dev_ids) > 1:
+        model = torch.nn.DataParallel(model, device_ids=dev_ids)
+        logger.info(f"Using DataParallel on GPUs: {dev_ids}")
+    elif use_cuda and len(dev_ids) == 1:
+        logger.info(f"Using single GPU: {dev_ids[0]}")
+    else:
+        logger.info("Using CPU")
+
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
-    scaler = torch.cuda.amp.GradScaler(enabled=bool(args.amp))
+    scaler = torch.amp.GradScaler("cuda", enabled=bool(args.amp and use_cuda))
     start_epoch = 0
     best = 1e9
     ma = None
 
     if args.resume:
         st = torch.load(args.resume, map_location="cpu")
-        model.load_state_dict(st["model"])
+        if isinstance(model, torch.nn.DataParallel):
+            model.module.load_state_dict(st["model"])
+        else:
+            model.load_state_dict(st["model"])
         opt.load_state_dict(st["opt"])
         start_epoch = st.get("epoch", 0) + 1
         best = st.get("best", best)
@@ -83,9 +109,11 @@ def main() -> None:
             score = batch["score"].to(device, non_blocking=True)
 
             opt.zero_grad(set_to_none=True)
-            with torch.cuda.amp.autocast(enabled=bool(args.amp)):
+            amp_ctx = torch.amp.autocast(device_type="cuda", enabled=True) if (args.amp and use_cuda) else nullcontext()
+            with amp_ctx:
                 out_d = model(x, return_logits=True, return_params=False)
-                loss, d = kd_total_loss(out_d["logits"], hm_t, score, model.decoder)
+                decoder = model.module.decoder if isinstance(model, torch.nn.DataParallel) else model.decoder
+                loss, d = kd_total_loss(out_d["logits"], hm_t, score, decoder)
             scaler.scale(loss).backward()
             scaler.step(opt)
             scaler.update()
@@ -103,7 +131,7 @@ def main() -> None:
                     "l_grad": float(d["l_grad"]),
                     "mu_err_px": float(d["mu_err_px"]),
                     "mean_score": float(batch["score"].mean().item()),
-                    "mean_score_raw": float(batch["score_raw"].mean().item()),
+                    "mean_score_raw": float(torch.nan_to_num(batch["score_raw"], nan=0.0).mean().item()),
                     "bad_npz_count": len(ds.badcases["missing_npz"]),
                 }
                 append_jsonl(out / "metrics.jsonl", rec)
@@ -111,10 +139,11 @@ def main() -> None:
             global_step += 1
 
         last_path = ckpt_dir / "last.pt"
-        torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "epoch": ep, "best": best}, last_path)
+        model_state = model.module.state_dict() if isinstance(model, torch.nn.DataParallel) else model.state_dict()
+        torch.save({"model": model_state, "opt": opt.state_dict(), "epoch": ep, "best": best}, last_path)
         if ma is not None and ma < best:
             best = ma
-            torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "epoch": ep, "best": best}, ckpt_dir / "best.pt")
+            torch.save({"model": model_state, "opt": opt.state_dict(), "epoch": ep, "best": best}, ckpt_dir / "best.pt")
 
     write_lines(bad_dir / "missing_npz.txt", ds.badcases["missing_npz"])
     write_lines(bad_dir / "missing_frames.txt", ds.badcases["missing_frames"])
