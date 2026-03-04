@@ -36,11 +36,9 @@ def _to_frame_id(v: Any) -> str | None:
 
 
 def _segment_from_path(path: str) -> str | None:
-    """Extract segment from common ready/raw frame path formats."""
     m = re.search(r"/(?:video_maked_ready|video_maked)/([^/]+)/frames_roi(?:/|$)", path)
     if m:
         return m.group(1)
-
     p = Path(path)
     parts = p.parts
     if "frames_roi" in parts:
@@ -65,7 +63,7 @@ def _collect_strings(obj: Any) -> list[str]:
 
 def _collect_paths_from_obj(obj: dict[str, Any]) -> list[str]:
     all_strings = _collect_strings(obj)
-    return [s for s in all_strings if "/frames_roi/" in s or s.endswith(".jpg") or s.endswith(".png")]
+    return [s for s in all_strings if "/frames_roi/" in s or s.endswith(".jpg") or s.endswith(".png") or s.endswith(".jpeg")]
 
 
 def _segment_from_obj(obj: dict[str, Any]) -> str | None:
@@ -76,49 +74,32 @@ def _segment_from_obj(obj: dict[str, Any]) -> str | None:
     return None
 
 
-def _ids_from_obj(obj: dict[str, Any], candidate_paths: list[str]) -> tuple[list[str], str | None]:
-    # explicit t0/t1/t2 style
-    explicit_key_sets = [
-        ("t0", "t1", "t2"),
-        ("tm2", "tm1", "t"),
-        ("prev2", "prev1", "curr"),
-        ("frame0", "frame1", "frame2"),
-    ]
-    for k0, k1, k2 in explicit_key_sets:
-        if all(k in obj for k in [k0, k1, k2]):
-            ids = [_to_frame_id(obj.get(k0)), _to_frame_id(obj.get(k1)), _to_frame_id(obj.get(k2))]  # type: ignore[list-item]
-            if any(i is None for i in ids):
-                return [], None
-            target_id = _to_frame_id(obj.get("target")) or _to_frame_id(obj.get("target_id")) or ids[1]
-            return ids, target_id
-
-    # any list-like frame container
-    list_keys = ["frames", "frame_paths", "imgs", "images", "window", "triplet"]
-    for lk in list_keys:
-        v = obj.get(lk)
-        if isinstance(v, list) and len(v) >= 3:
-            ids = [_to_frame_id(x) for x in v[:3]]  # type: ignore[list-item]
-            if any(i is None for i in ids):
-                continue
-            t = obj.get("target", obj.get("target_idx", obj.get("label", 1)))
-            if isinstance(t, int):
-                target = ids[max(0, min(2, t))]
-            else:
-                target = _to_frame_id(t) or ids[1]
-            return ids, target
-
-    # fallback: use first 3 path-like strings found recursively
-    path_ids = [_to_frame_id(p) for p in candidate_paths if _to_frame_id(p) is not None]
-    if len(path_ids) >= 3:
-        ids = path_ids[:3]
-        t = obj.get("target", obj.get("target_idx", 1))
-        if isinstance(t, int):
-            target = ids[max(0, min(2, t))]
+def _build_paths_from_frame_list(frames: list[Any], ready_root: str, segment: str) -> tuple[tuple[str, str, str], list[str]] | None:
+    if len(frames) < 3:
+        return None
+    first3 = frames[:3]
+    names: list[str] = []
+    ids: list[str] = []
+    for f in first3:
+        if isinstance(f, str):
+            p = Path(f)
+            name = p.name
+            if not p.suffix:
+                name = f"{p.name}.jpg"
+            names.append(name)
+            fid = _to_frame_id(name)
+            if fid is None:
+                return None
+            ids.append(fid)
         else:
-            target = _to_frame_id(t) or ids[1]
-        return ids, target
+            fid = _to_frame_id(f)
+            if fid is None:
+                return None
+            ids.append(fid)
+            names.append(f"{fid}.jpg")
 
-    return [], None
+    paths = tuple(str(Path(ready_root) / segment / "frames_roi" / n) for n in names)
+    return paths, ids
 
 
 def parse_index(jsonl_path: str, ready_root: str) -> list[SampleSpec]:
@@ -148,21 +129,55 @@ def parse_index(jsonl_path: str, ready_root: str) -> list[SampleSpec]:
                 warnings.warn(f"skip line {ln}: missing segment")
                 continue
 
-            ids, target_id = _ids_from_obj(obj, candidate_paths)
-            if len(ids) != 3 or target_id is None:
-                warnings.warn(f"skip line {ln}: cannot resolve frame ids")
-                continue
+            # Prefer list frame fields to preserve original filename style (e.g. 254.jpg)
+            list_keys = ["frames", "frame_paths", "imgs", "images", "window", "triplet"]
+            frame_paths: tuple[str, str, str] | None = None
+            ids: list[str] = []
+            for lk in list_keys:
+                v = obj.get(lk)
+                if isinstance(v, list) and len(v) >= 3:
+                    built = _build_paths_from_frame_list(v, ready_root, segment)
+                    if built is not None:
+                        frame_paths, ids = built
+                        break
 
-            frame_paths = tuple(str(Path(ready_root) / segment / "frames_roi" / f"{fid}.jpg") for fid in ids)
-            target_path = str(Path(ready_root) / segment / "frames_roi" / f"{target_id}.jpg")
-            specs.append(
-                SampleSpec(
-                    segment=segment,
-                    frame_paths=frame_paths,
-                    target_frame_path=target_path,
-                    target_id=target_id,
-                )
-            )
+            if frame_paths is None:
+                # explicit id-like fields
+                explicit_key_sets = [
+                    ("t0", "t1", "t2"),
+                    ("tm2", "tm1", "t"),
+                    ("prev2", "prev1", "curr"),
+                    ("frame0", "frame1", "frame2"),
+                ]
+                for k0, k1, k2 in explicit_key_sets:
+                    if all(k in obj for k in [k0, k1, k2]):
+                        ids = [_to_frame_id(obj.get(k0)), _to_frame_id(obj.get(k1)), _to_frame_id(obj.get(k2))]  # type: ignore[list-item]
+                        if any(i is None for i in ids):
+                            ids = []
+                            break
+                        frame_paths = tuple(str(Path(ready_root) / segment / "frames_roi" / f"{fid}.jpg") for fid in ids)
+                        break
+
+            if frame_paths is None or len(ids) != 3:
+                # last fallback from discovered path strings
+                path_ids = [_to_frame_id(p) for p in candidate_paths if _to_frame_id(p) is not None]
+                if len(path_ids) >= 3:
+                    ids = path_ids[:3]
+                    frame_paths = tuple(str(Path(ready_root) / segment / "frames_roi" / f"{fid}.jpg") for fid in ids)
+                else:
+                    warnings.warn(f"skip line {ln}: cannot resolve frame ids")
+                    continue
+
+            t = obj.get("target", obj.get("target_idx", obj.get("label", 1)))
+            if isinstance(t, int):
+                t_idx = max(0, min(2, t))
+                target_id = ids[t_idx]
+                target_path = frame_paths[t_idx]
+            else:
+                target_id = _to_frame_id(t) or ids[1]
+                target_path = str(Path(ready_root) / segment / "frames_roi" / f"{target_id}.jpg")
+
+            specs.append(SampleSpec(segment=segment, frame_paths=frame_paths, target_frame_path=target_path, target_id=target_id))
         except Exception as exc:
             warnings.warn(f"skip line {ln}: parse exception: {exc}")
 

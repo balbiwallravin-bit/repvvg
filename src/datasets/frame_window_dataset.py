@@ -13,6 +13,52 @@ from src.datasets.ready_index import SampleSpec
 from src.datasets.transforms import read_rgb_288x512
 
 
+def _resolve_frame_path(path: str) -> str:
+    p = Path(path)
+    if p.exists():
+        return str(p)
+
+    parent = p.parent
+    stem = p.stem
+    suffixes = [p.suffix, ".jpg", ".jpeg", ".png", ".JPG", ".JPEG", ".PNG"]
+    suffixes = [s for i, s in enumerate(suffixes) if s and s not in suffixes[:i]]
+
+    # numeric fallback: 000254 -> 254 and vice versa
+    cand_stems = [stem]
+    if stem.isdigit():
+        raw = str(int(stem))
+        z6 = stem.zfill(6)
+        cand_stems.extend([raw, z6])
+
+    for cs in cand_stems:
+        for suf in suffixes:
+            cp = parent / f"{cs}{suf}"
+            if cp.exists():
+                return str(cp)
+
+    # final fuzzy fallback: any file with same numeric token
+    if stem.isdigit():
+        token = str(int(stem))
+        for ext in ["*.jpg", "*.jpeg", "*.png", "*.JPG", "*.JPEG", "*.PNG"]:
+            for fp in parent.glob(ext):
+                if fp.stem.isdigit() and str(int(fp.stem)) == token:
+                    return str(fp)
+
+    raise FileNotFoundError(path)
+
+
+def _candidate_npz_paths(pseudo_root: Path, segment: str, target_id: str) -> list[str]:
+    ids = [target_id]
+    if target_id.isdigit():
+        ids.extend([str(int(target_id)), target_id.zfill(6)])
+    # dedupe preserve order
+    uniq: list[str] = []
+    for x in ids:
+        if x not in uniq:
+            uniq.append(x)
+    return [str(pseudo_root / segment / f"{x}.npz") for x in uniq]
+
+
 class FrameWindowDataset(Dataset):
     def __init__(self, specs: list[SampleSpec], pseudo_root: str, strict: int = 0):
         self.specs = specs
@@ -26,20 +72,33 @@ class FrameWindowDataset(Dataset):
     def __getitem__(self, idx: int) -> dict[str, Any] | None:
         spec = self.specs[idx]
         try:
-            imgs = [read_rgb_288x512(p) for p in spec.frame_paths]
+            resolved = [_resolve_frame_path(p) for p in spec.frame_paths]
+            imgs = [read_rgb_288x512(p) for p in resolved]
             x = torch.from_numpy(np.concatenate([i.transpose(2, 0, 1) for i in imgs], axis=0)).float()
         except Exception:
             self.badcases["missing_frames"].append("|".join(spec.frame_paths))
             if self.strict:
                 raise
             return None
-        npz_path = str(self.pseudo_root / spec.segment / f"{spec.target_id}.npz")
-        try:
-            hm, score, score_raw = load_npz_hm(npz_path, strict=self.strict)
-        except Exception:
-            self.badcases["missing_npz"].append(npz_path)
+
+        hm = None
+        score = 1.0
+        score_raw = 1.0
+        npz_err = None
+        used_npz = None
+        for npz_path in _candidate_npz_paths(self.pseudo_root, spec.segment, spec.target_id):
+            try:
+                hm, score, score_raw = load_npz_hm(npz_path, strict=self.strict)
+                used_npz = npz_path
+                break
+            except Exception as e:
+                npz_err = e
+                continue
+
+        if hm is None:
+            self.badcases["missing_npz"].append(str(npz_err) if npz_err is not None else f"{spec.segment}:{spec.target_id}")
             if self.strict:
-                raise
+                raise ValueError(f"npz not found for {spec.segment}/{spec.target_id}")
             return None
 
         return {
@@ -47,7 +106,13 @@ class FrameWindowDataset(Dataset):
             "hm_t": torch.from_numpy(hm),
             "score": torch.tensor(float(max(0.0, min(1.0, score))), dtype=torch.float32),
             "score_raw": torch.tensor(float(score_raw), dtype=torch.float32),
-            "meta": {"segment": spec.segment, "target_id": spec.target_id, "frame_paths": spec.frame_paths},
+            "meta": {
+                "segment": spec.segment,
+                "target_id": spec.target_id,
+                "frame_paths": spec.frame_paths,
+                "resolved_frame_paths": resolved,
+                "npz_path": used_npz,
+            },
         }
 
 
