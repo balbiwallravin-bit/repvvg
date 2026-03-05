@@ -16,6 +16,12 @@ import torch
 
 from src.models.student_net import StudentNet
 
+# Default ROI in original 1920x1080 coordinate system.
+ROI_X0 = 367
+ROI_Y0 = 100
+ROI_X1 = 1760
+ROI_Y1 = 884
+
 
 def _load_ckpt(path: str) -> dict[str, Any]:
     try:
@@ -38,14 +44,49 @@ def _preprocess_rgb(frame_bgr: np.ndarray) -> np.ndarray:
     return rgb.astype(np.float32) / 255.0
 
 
-def _draw_result(frame_bgr: np.ndarray, mu_xy: np.ndarray, dir_xy: np.ndarray, length_px: float, score: float) -> np.ndarray:
+def _model_to_frame_xy(mu_xy_model: np.ndarray, w: int, h: int) -> np.ndarray:
+    sx = w / 512.0
+    sy = h / 288.0
+    return np.array([float(mu_xy_model[0]) * sx, float(mu_xy_model[1]) * sy], dtype=np.float32)
+
+
+def _center_weight(point_xy: np.ndarray, roi: tuple[int, int, int, int], sigma_scale: float = 0.35) -> float:
+    x0, y0, x1, y1 = roi
+    cx = 0.5 * (x0 + x1)
+    cy = 0.5 * (y0 + y1)
+    hw = max((x1 - x0) * 0.5, 1.0)
+    hh = max((y1 - y0) * 0.5, 1.0)
+
+    nx = (float(point_xy[0]) - cx) / hw
+    ny = (float(point_xy[1]) - cy) / hh
+    d2 = nx * nx + ny * ny
+    sigma2 = max(sigma_scale * sigma_scale, 1e-6)
+    return float(np.exp(-0.5 * d2 / sigma2))
+
+
+def _in_roi(point_xy: np.ndarray, roi: tuple[int, int, int, int]) -> bool:
+    x0, y0, x1, y1 = roi
+    x, y = float(point_xy[0]), float(point_xy[1])
+    return (x0 <= x <= x1) and (y0 <= y <= y1)
+
+
+def _draw_result(
+    frame_bgr: np.ndarray,
+    mu_xy_model: np.ndarray,
+    dir_xy: np.ndarray,
+    length_px_model: float,
+    score_raw: float,
+    score_roi: float,
+    roi: tuple[int, int, int, int],
+) -> np.ndarray:
     vis = frame_bgr.copy()
     h, w = vis.shape[:2]
     sx = w / 512.0
     sy = h / 288.0
 
-    cx = float(mu_xy[0] * sx)
-    cy = float(mu_xy[1] * sy)
+    center_xy = _model_to_frame_xy(mu_xy_model, w, h)
+    cx = float(center_xy[0])
+    cy = float(center_xy[1])
 
     dx = float(dir_xy[0])
     dy = float(dir_xy[1])
@@ -53,7 +94,7 @@ def _draw_result(frame_bgr: np.ndarray, mu_xy: np.ndarray, dir_xy: np.ndarray, l
     dx /= n
     dy /= n
 
-    half = max(float(length_px), 4.0) * 0.5
+    half = max(float(length_px_model), 4.0) * 0.5
     ex = dx * half * sx
     ey = dy * half * sy
 
@@ -62,11 +103,25 @@ def _draw_result(frame_bgr: np.ndarray, mu_xy: np.ndarray, dir_xy: np.ndarray, l
     c = (0, 255, 0)
     cv2.line(vis, p1, p2, c, 2, lineType=cv2.LINE_AA)
     cv2.circle(vis, (int(round(cx)), int(round(cy))), 4, (0, 0, 255), -1, lineType=cv2.LINE_AA)
-    cv2.putText(vis, f"score={score:.3f}", (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2, cv2.LINE_AA)
+
+    x0, y0, x1, y1 = roi
+    cv2.rectangle(vis, (x0, y0), (x1, y1), (255, 128, 0), 2, lineType=cv2.LINE_AA)
+
+    cv2.putText(vis, f"score_raw={score_raw:.3f}", (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2, cv2.LINE_AA)
+    cv2.putText(vis, f"score_roi={score_roi:.3f}", (12, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
     return vis
 
 
-def track_one_video(video_path: Path, ckpt_path: Path, out_root: Path, device: torch.device, log_every: int = 30) -> Path:
+def track_one_video(
+    video_path: Path,
+    ckpt_path: Path,
+    out_root: Path,
+    device: torch.device,
+    roi: tuple[int, int, int, int],
+    smooth_alpha: float,
+    center_boost: float,
+    log_every: int = 30,
+) -> Path:
     start_ts = _parse_start_ts(video_path.name)
     out_dir = out_root / start_ts
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -101,6 +156,8 @@ def track_one_video(video_path: Path, ckpt_path: Path, out_root: Path, device: t
 
     print(f"[track] {video_path} total_frames={len(frames)} -> {out_path}")
 
+    smoothed_mu_model: np.ndarray | None = None
+
     with torch.no_grad():
         for i in range(len(frames)):
             left = frames[max(i - 1, 0)]
@@ -114,17 +171,29 @@ def track_one_video(video_path: Path, ckpt_path: Path, out_root: Path, device: t
             ], axis=0)
             xt = torch.from_numpy(x).unsqueeze(0).to(device)
             out = model(xt)
-            mu_xy = out["mu_xy"][0, 0].cpu().numpy()
+
+            mu_model = out["mu_xy"][0, 0].cpu().numpy().astype(np.float32)
+            if smoothed_mu_model is None:
+                smoothed_mu_model = mu_model
+            else:
+                smoothed_mu_model = smooth_alpha * mu_model + (1.0 - smooth_alpha) * smoothed_mu_model
+
             dir_xy = out["dir_xy"][0, 0].cpu().numpy()
             length_px = float(out["l"][0, 0].cpu().item())
-            score = float(out["prob"][0, 0].max().cpu().item())
+            score_raw = float(out["prob"][0, 0].max().cpu().item())
 
-            vis = _draw_result(mid, mu_xy, dir_xy, length_px, score)
+            center_xy = _model_to_frame_xy(smoothed_mu_model, w, h)
+            in_roi = _in_roi(center_xy, roi)
+            c_weight = _center_weight(center_xy, roi)
+            roi_gate = 1.0 if in_roi else 0.05
+            score_roi = score_raw * (roi_gate * (1.0 + center_boost * c_weight))
+
+            vis = _draw_result(mid, smoothed_mu_model, dir_xy, length_px, score_raw, score_roi, roi)
             writer.write(vis)
 
             if log_every > 0 and ((i + 1) % log_every == 0 or i + 1 == len(frames)):
                 pct = 100.0 * (i + 1) / len(frames)
-                print(f"[progress] {video_path.name}: {i + 1}/{len(frames)} ({pct:.1f}%)")
+                print(f"[progress] {video_path.name}: {i + 1}/{len(frames)} ({pct:.1f}%) score_roi={score_roi:.3f}")
 
     cap.release()
     writer.release()
@@ -138,15 +207,33 @@ def main() -> None:
     ap.add_argument("--out_root", default="/home/lht/blurtrack/outputs", help="output root")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--log_every", type=int, default=30)
+    ap.add_argument("--smooth_alpha", type=float, default=0.35, help="EMA alpha for center smoothing")
+    ap.add_argument("--center_boost", type=float, default=1.0, help="extra score multiplier near ROI center")
+    ap.add_argument("--roi_x0", type=int, default=ROI_X0)
+    ap.add_argument("--roi_y0", type=int, default=ROI_Y0)
+    ap.add_argument("--roi_x1", type=int, default=ROI_X1)
+    ap.add_argument("--roi_y1", type=int, default=ROI_Y1)
     args = ap.parse_args()
 
     device = torch.device(args.device)
     out_root = Path(args.out_root)
+    roi = (args.roi_x0, args.roi_y0, args.roi_x1, args.roi_y1)
 
     outputs: list[Path] = []
     for vp in args.videos:
         p = Path(vp)
-        outputs.append(track_one_video(p, Path(args.ckpt), out_root, device, log_every=args.log_every))
+        outputs.append(
+            track_one_video(
+                p,
+                Path(args.ckpt),
+                out_root,
+                device,
+                roi=roi,
+                smooth_alpha=args.smooth_alpha,
+                center_boost=args.center_boost,
+                log_every=args.log_every,
+            )
+        )
 
     print("[done] outputs:")
     for op in outputs:
