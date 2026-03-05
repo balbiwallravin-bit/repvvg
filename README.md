@@ -83,3 +83,6 @@ CUDA_VISIBLE_DEVICES=4,5,6 torchrun --nproc_per_node=3 tools/train_torchrun.py \
   --roi_x0 367 --roi_y0 100 --roi_x1 1760 --roi_y1 884 \
   --visi_thr 0.25 --hard_neg_ratio 0.2 --neg_hm_scale 0.1 --vis_loss_w 1.0
 ```
+
+
+When using torchrun, `--batch_size` is **per-process** (per GPU). With 3 GPUs, global batch is `3 * batch_size`. If OOM appears, reduce `--batch_size` (e.g. 16 or 8) first.
