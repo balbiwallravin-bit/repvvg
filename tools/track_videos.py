@@ -146,6 +146,7 @@ def _draw_result(
     score_raw: float,
     score_roi: float,
     roi: tuple[int, int, int, int],
+    draw_track: bool,
 ) -> np.ndarray:
     vis = frame_bgr.copy()
     h, w = vis.shape[:2]
@@ -166,17 +167,19 @@ def _draw_result(
     ex = dx * half * sx
     ey = dy * half * sy
 
-    p1 = (int(round(cx - ex)), int(round(cy - ey)))
-    p2 = (int(round(cx + ex)), int(round(cy + ey)))
-    c = (0, 255, 0)
-    cv2.line(vis, p1, p2, c, 2, lineType=cv2.LINE_AA)
-    cv2.circle(vis, (int(round(cx)), int(round(cy))), 4, (0, 0, 255), -1, lineType=cv2.LINE_AA)
-
     x0, y0, x1, y1 = roi
+    p1 = (int(round(np.clip(cx - ex, x0, x1))), int(round(np.clip(cy - ey, y0, y1))))
+    p2 = (int(round(np.clip(cx + ex, x0, x1))), int(round(np.clip(cy + ey, y0, y1))))
+    c = (0, 255, 0)
+    if draw_track:
+        cv2.line(vis, p1, p2, c, 2, lineType=cv2.LINE_AA)
+        cv2.circle(vis, (int(round(np.clip(cx, x0, x1))), int(round(np.clip(cy, y0, y1)))), 4, (0, 0, 255), -1, lineType=cv2.LINE_AA)
+
     cv2.rectangle(vis, (x0, y0), (x1, y1), (255, 128, 0), 2, lineType=cv2.LINE_AA)
 
     cv2.putText(vis, f"score_raw={score_raw:.3f}", (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2, cv2.LINE_AA)
     cv2.putText(vis, f"score_roi={score_roi:.3f}", (12, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
+    cv2.putText(vis, f"visible={1 if draw_track else 0}", (12, 84), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (180, 255, 180), 2, cv2.LINE_AA)
     return vis
 
 
@@ -190,6 +193,7 @@ def track_one_video(
     smooth_alpha: float,
     center_boost: float,
     log_every: int = 30,
+    min_score_roi: float = 0.12,
 ) -> Path:
     start_ts = _parse_start_ts(video_path.name)
     out_dir = out_root / start_ts
@@ -264,12 +268,13 @@ def track_one_video(
             roi_gate = 1.0 if in_roi else 0.05
             score_roi = score_masked * (roi_gate * (1.0 + center_boost * c_weight))
 
-            vis = _draw_result(mid, smoothed_mu_model, dir_xy, length_px, score_raw, score_roi, roi_frame)
+            draw_track = score_roi >= min_score_roi
+            vis = _draw_result(mid, smoothed_mu_model, dir_xy, length_px, score_raw, score_roi, roi_frame, draw_track=draw_track)
             writer.write(vis)
 
             if log_every > 0 and ((i + 1) % log_every == 0 or i + 1 == len(frames)):
                 pct = 100.0 * (i + 1) / len(frames)
-                print(f"[progress] {video_path.name}: {i + 1}/{len(frames)} ({pct:.1f}%) score_roi={score_roi:.3f}")
+                print(f"[progress] {video_path.name}: {i + 1}/{len(frames)} ({pct:.1f}%) score_roi={score_roi:.3f} visible={int(draw_track)}")
 
     cap.release()
     writer.release()
@@ -291,6 +296,7 @@ def main() -> None:
     ap.add_argument("--roi_y0", type=int, default=ROI_Y0)
     ap.add_argument("--roi_x1", type=int, default=ROI_X1)
     ap.add_argument("--roi_y1", type=int, default=ROI_Y1)
+    ap.add_argument("--min_score_roi", type=float, default=0.12, help="hide track drawing when score_roi is below threshold")
     args = ap.parse_args()
 
     device = torch.device(args.device)
@@ -312,6 +318,7 @@ def main() -> None:
                 smooth_alpha=args.smooth_alpha,
                 center_boost=args.center_boost,
                 log_every=args.log_every,
+                min_score_roi=args.min_score_roi,
             )
         )
 
