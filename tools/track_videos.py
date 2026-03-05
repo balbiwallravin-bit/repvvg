@@ -16,7 +16,7 @@ import torch
 
 from src.models.student_net import StudentNet
 
-# Default ROI in original 1920x1080 coordinate system.
+# Default ROI in reference 1920x1080 coordinate system.
 ROI_X0 = 367
 ROI_Y0 = 100
 ROI_X1 = 1760
@@ -50,6 +50,34 @@ def _model_to_frame_xy(mu_xy_model: np.ndarray, w: int, h: int) -> np.ndarray:
     return np.array([float(mu_xy_model[0]) * sx, float(mu_xy_model[1]) * sy], dtype=np.float32)
 
 
+def _frame_to_model_xy(point_xy: np.ndarray, w: int, h: int) -> np.ndarray:
+    sx = 512.0 / max(float(w), 1.0)
+    sy = 288.0 / max(float(h), 1.0)
+    return np.array([float(point_xy[0]) * sx, float(point_xy[1]) * sy], dtype=np.float32)
+
+
+def _scale_roi_to_frame(roi_ref: tuple[int, int, int, int], ref_size: tuple[int, int], frame_size: tuple[int, int]) -> tuple[int, int, int, int]:
+    rx0, ry0, rx1, ry1 = roi_ref
+    ref_w, ref_h = ref_size
+    fw, fh = frame_size
+    sx = fw / max(float(ref_w), 1.0)
+    sy = fh / max(float(ref_h), 1.0)
+
+    x0 = int(round(rx0 * sx))
+    y0 = int(round(ry0 * sy))
+    x1 = int(round(rx1 * sx))
+    y1 = int(round(ry1 * sy))
+    x0 = max(0, min(fw - 1, x0))
+    x1 = max(0, min(fw - 1, x1))
+    y0 = max(0, min(fh - 1, y0))
+    y1 = max(0, min(fh - 1, y1))
+    if x1 <= x0:
+        x1 = min(fw - 1, x0 + 1)
+    if y1 <= y0:
+        y1 = min(fh - 1, y0 + 1)
+    return (x0, y0, x1, y1)
+
+
 def _center_weight(point_xy: np.ndarray, roi: tuple[int, int, int, int], sigma_scale: float = 0.35) -> float:
     x0, y0, x1, y1 = roi
     cx = 0.5 * (x0 + x1)
@@ -68,6 +96,46 @@ def _in_roi(point_xy: np.ndarray, roi: tuple[int, int, int, int]) -> bool:
     x0, y0, x1, y1 = roi
     x, y = float(point_xy[0]), float(point_xy[1])
     return (x0 <= x <= x1) and (y0 <= y <= y1)
+
+
+def _clip_to_roi(point_xy: np.ndarray, roi: tuple[int, int, int, int]) -> np.ndarray:
+    x0, y0, x1, y1 = roi
+    return np.array([
+        float(np.clip(point_xy[0], x0, x1)),
+        float(np.clip(point_xy[1], y0, y1)),
+    ], dtype=np.float32)
+
+
+def _roi_masked_mu_from_prob(prob_hw: np.ndarray, roi_frame: tuple[int, int, int, int], frame_size: tuple[int, int]) -> tuple[np.ndarray, float]:
+    """Return model-space mu_xy from ROI-masked heatmap and masked max score."""
+    h_hm, w_hm = prob_hw.shape
+    fw, fh = frame_size
+    x0, y0, x1, y1 = roi_frame
+
+    sx = w_hm / max(float(fw), 1.0)
+    sy = h_hm / max(float(fh), 1.0)
+    hx0 = int(np.clip(np.floor(x0 * sx), 0, w_hm - 1))
+    hx1 = int(np.clip(np.ceil(x1 * sx), 0, w_hm - 1))
+    hy0 = int(np.clip(np.floor(y0 * sy), 0, h_hm - 1))
+    hy1 = int(np.clip(np.ceil(y1 * sy), 0, h_hm - 1))
+
+    mask = np.zeros_like(prob_hw, dtype=np.float32)
+    mask[hy0 : hy1 + 1, hx0 : hx1 + 1] = 1.0
+    p = prob_hw.astype(np.float32) * mask
+    s = float(p.sum())
+    if s <= 1e-8:
+        p = prob_hw.astype(np.float32)
+        s = float(p.sum())
+    p /= max(s, 1e-8)
+
+    yy, xx = np.meshgrid(np.arange(h_hm, dtype=np.float32), np.arange(w_hm, dtype=np.float32), indexing="ij")
+    mx = float((p * xx).sum())
+    my = float((p * yy).sum())
+
+    # heatmap index -> model 512x288 coords (stride=4 with +0.5 cell center)
+    mu_model = np.array([(mx + 0.5) * 4.0, (my + 0.5) * 4.0], dtype=np.float32)
+    score_masked = float(p.max())
+    return mu_model, score_masked
 
 
 def _draw_result(
@@ -117,7 +185,8 @@ def track_one_video(
     ckpt_path: Path,
     out_root: Path,
     device: torch.device,
-    roi: tuple[int, int, int, int],
+    roi_ref: tuple[int, int, int, int],
+    roi_ref_size: tuple[int, int],
     smooth_alpha: float,
     center_boost: float,
     log_every: int = 30,
@@ -136,6 +205,8 @@ def track_one_video(
         fps = 25.0
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    roi_frame = _scale_roi_to_frame(roi_ref, roi_ref_size, (w, h))
+
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(str(out_path), fourcc, fps, (w, h))
 
@@ -154,7 +225,7 @@ def track_one_video(
         writer.release()
         raise RuntimeError(f"empty video: {video_path}")
 
-    print(f"[track] {video_path} total_frames={len(frames)} -> {out_path}")
+    print(f"[track] {video_path} total_frames={len(frames)} roi_frame={roi_frame} -> {out_path}")
 
     smoothed_mu_model: np.ndarray | None = None
 
@@ -172,23 +243,28 @@ def track_one_video(
             xt = torch.from_numpy(x).unsqueeze(0).to(device)
             out = model(xt)
 
-            mu_model = out["mu_xy"][0, 0].cpu().numpy().astype(np.float32)
+            prob = out["prob"][0, 0].cpu().numpy()
+            mu_model, score_masked = _roi_masked_mu_from_prob(prob, roi_frame, (w, h))
+
             if smoothed_mu_model is None:
                 smoothed_mu_model = mu_model
             else:
                 smoothed_mu_model = smooth_alpha * mu_model + (1.0 - smooth_alpha) * smoothed_mu_model
 
+            smoothed_xy_frame = _model_to_frame_xy(smoothed_mu_model, w, h)
+            smoothed_xy_frame = _clip_to_roi(smoothed_xy_frame, roi_frame)
+            smoothed_mu_model = _frame_to_model_xy(smoothed_xy_frame, w, h)
+
             dir_xy = out["dir_xy"][0, 0].cpu().numpy()
             length_px = float(out["l"][0, 0].cpu().item())
             score_raw = float(out["prob"][0, 0].max().cpu().item())
 
-            center_xy = _model_to_frame_xy(smoothed_mu_model, w, h)
-            in_roi = _in_roi(center_xy, roi)
-            c_weight = _center_weight(center_xy, roi)
+            c_weight = _center_weight(smoothed_xy_frame, roi_frame)
+            in_roi = _in_roi(smoothed_xy_frame, roi_frame)
             roi_gate = 1.0 if in_roi else 0.05
-            score_roi = score_raw * (roi_gate * (1.0 + center_boost * c_weight))
+            score_roi = score_masked * (roi_gate * (1.0 + center_boost * c_weight))
 
-            vis = _draw_result(mid, smoothed_mu_model, dir_xy, length_px, score_raw, score_roi, roi)
+            vis = _draw_result(mid, smoothed_mu_model, dir_xy, length_px, score_raw, score_roi, roi_frame)
             writer.write(vis)
 
             if log_every > 0 and ((i + 1) % log_every == 0 or i + 1 == len(frames)):
@@ -209,6 +285,8 @@ def main() -> None:
     ap.add_argument("--log_every", type=int, default=30)
     ap.add_argument("--smooth_alpha", type=float, default=0.35, help="EMA alpha for center smoothing")
     ap.add_argument("--center_boost", type=float, default=1.0, help="extra score multiplier near ROI center")
+    ap.add_argument("--roi_ref_w", type=int, default=1920, help="ROI reference width")
+    ap.add_argument("--roi_ref_h", type=int, default=1080, help="ROI reference height")
     ap.add_argument("--roi_x0", type=int, default=ROI_X0)
     ap.add_argument("--roi_y0", type=int, default=ROI_Y0)
     ap.add_argument("--roi_x1", type=int, default=ROI_X1)
@@ -217,7 +295,8 @@ def main() -> None:
 
     device = torch.device(args.device)
     out_root = Path(args.out_root)
-    roi = (args.roi_x0, args.roi_y0, args.roi_x1, args.roi_y1)
+    roi_ref = (args.roi_x0, args.roi_y0, args.roi_x1, args.roi_y1)
+    roi_ref_size = (args.roi_ref_w, args.roi_ref_h)
 
     outputs: list[Path] = []
     for vp in args.videos:
@@ -228,7 +307,8 @@ def main() -> None:
                 Path(args.ckpt),
                 out_root,
                 device,
-                roi=roi,
+                roi_ref=roi_ref,
+                roi_ref_size=roi_ref_size,
                 smooth_alpha=args.smooth_alpha,
                 center_boost=args.center_boost,
                 log_every=args.log_every,
