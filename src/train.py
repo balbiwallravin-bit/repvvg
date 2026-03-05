@@ -48,11 +48,20 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--hard_neg_ratio", type=float, default=0.2)
     p.add_argument("--neg_hm_scale", type=float, default=0.1)
     p.add_argument("--vis_loss_w", type=float, default=1.0)
-    return p.parse_args()
+
+    # torchrun compatibility across versions
+    p.add_argument("--local_rank", type=int, default=0)
+    p.add_argument("--local-rank", dest="local_rank", type=int, default=0)
+
+    args, unknown = p.parse_known_args()
+    if unknown:
+        print({"ignored_unknown_args": unknown})
+    return args
 
 
 def main() -> None:
     args = parse_args()
+    print({"train_entry": __file__})
     set_seed(args.seed)
     out = Path(args.out_dir)
     ckpt_dir = ensure_dir(out / "checkpoints")

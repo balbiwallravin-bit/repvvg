@@ -68,3 +68,18 @@ The `--ckpt` argument accepts either a checkpoint file or a run directory (auto-
 
 
 If eval says checkpoints directory is empty, it means no `.pt` was produced yet (often training stopped too early). Re-run training and wait for at least one epoch end, or update to this version where `last.pt` is written at train start.
+
+
+For multi-GPU training with `torchrun`, prefer script entry to avoid module-name collisions with external `src` packages:
+
+```bash
+CUDA_VISIBLE_DEVICES=4,5,6 torchrun --nproc_per_node=3 tools/train_torchrun.py \
+  --index /home/lht/blurtrack/video_maked/index_train_ready.jsonl \
+  --ready_root /home/lht/blurtrack/video_maked_ready \
+  --pseudo_root /home/lht/blurtrack/pseudo/heatmaps \
+  --out_dir /home/lht/blurtrack/outputs/run_roi_visi \
+  --batch_size 64 --epochs 50 --lr 3e-4 --amp 1 --num_workers 8 \
+  --roi_enable 1 --roi_ref_w 1920 --roi_ref_h 1080 \
+  --roi_x0 367 --roi_y0 100 --roi_x1 1760 --roi_y1 884 \
+  --visi_thr 0.25 --hard_neg_ratio 0.2 --neg_hm_scale 0.1 --vis_loss_w 1.0
+```
