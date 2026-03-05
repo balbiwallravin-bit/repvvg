@@ -37,7 +37,11 @@ def main() -> None:
 
     model = StudentNet().eval()
     if args.ckpt:
-        model.load_state_dict(torch.load(args.ckpt, map_location="cpu")["model"])
+        try:
+            ckpt = torch.load(args.ckpt, map_location="cpu", weights_only=True)
+        except TypeError:
+            ckpt = torch.load(args.ckpt, map_location="cpu")
+        model.load_state_dict(ckpt["model"])
     with torch.no_grad():
         out = model(item["x"].unsqueeze(0))
     hm_s = out["prob"][0, 0].numpy()

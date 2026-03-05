@@ -31,3 +31,14 @@ def test_moment_decoder_direction() -> None:
     alt = (pred + 180.0) % 360.0
     err = min(abs(pred - target), abs(alt - target))
     assert err < 10.0
+
+
+def test_moment_decoder_state_dict_roundtrip() -> None:
+    dec = MomentDecoder()
+    state = dec.state_dict()
+
+    other = MomentDecoder()
+    other.load_state_dict(state)
+
+    assert torch.equal(other.grid_x, dec.grid_x)
+    assert torch.equal(other.grid_y, dec.grid_y)
