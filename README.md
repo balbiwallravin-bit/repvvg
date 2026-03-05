@@ -58,7 +58,10 @@ python -m src.train   --index /home/lht/blurtrack/video_maked/index_train_ready.
 ## Evaluate visible/no-ball split
 
 ```bash
-python -m src.eval   --index /home/lht/blurtrack/video_maked/index_train_ready.jsonl   --ready_root /home/lht/blurtrack/video_maked_ready   --pseudo_root /home/lht/blurtrack/pseudo/heatmaps   --ckpt /home/lht/blurtrack/outputs/run_roi_visi/checkpoints/best.pt   --batch_size 16 --max_batches 200 --log_every 20   --roi_enable 1 --roi_ref_w 1920 --roi_ref_h 1080   --roi_x0 367 --roi_y0 100 --roi_x1 1760 --roi_y1 884   --visi_thr 0.25 --vis_conf_thr 0.5
+python -m src.eval   --index /home/lht/blurtrack/video_maked/index_train_ready.jsonl   --ready_root /home/lht/blurtrack/video_maked_ready   --pseudo_root /home/lht/blurtrack/pseudo/heatmaps   --ckpt /home/lht/blurtrack/outputs/run_roi_visi   --batch_size 16 --max_batches 200 --log_every 20   --roi_enable 1 --roi_ref_w 1920 --roi_ref_h 1080   --roi_x0 367 --roi_y0 100 --roi_x1 1760 --roi_y1 884   --visi_thr 0.25 --vis_conf_thr 0.5
 ```
 
 Eval output includes `fp_rate`, `fn_rate`, and `mu_err_px_visible`.
+
+
+The `--ckpt` argument accepts either a checkpoint file or a run directory (auto-tries `checkpoints/best.pt` then `checkpoints/last.pt`).
