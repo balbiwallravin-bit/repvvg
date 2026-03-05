@@ -35,6 +35,19 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--strict", type=int, default=0)
     p.add_argument("--log_every", type=int, default=20)
     p.add_argument("--devices", default="", help="comma-separated cuda device ids, e.g. 0,1,2,3")
+
+    p.add_argument("--roi_enable", type=int, default=1)
+    p.add_argument("--roi_ref_w", type=int, default=1920)
+    p.add_argument("--roi_ref_h", type=int, default=1080)
+    p.add_argument("--roi_x0", type=int, default=367)
+    p.add_argument("--roi_y0", type=int, default=100)
+    p.add_argument("--roi_x1", type=int, default=1760)
+    p.add_argument("--roi_y1", type=int, default=884)
+
+    p.add_argument("--visi_thr", type=float, default=0.25)
+    p.add_argument("--hard_neg_ratio", type=float, default=0.2)
+    p.add_argument("--neg_hm_scale", type=float, default=0.1)
+    p.add_argument("--vis_loss_w", type=float, default=1.0)
     return p.parse_args()
 
 
@@ -50,12 +63,22 @@ def main() -> None:
     specs = parse_index(args.index, args.ready_root)
     logger.info(f"parsed_samples={len(specs)} from index={args.index}")
     if len(specs) == 0:
-        raise RuntimeError(
-            "No valid samples parsed from index file. "
-            "Please verify index schema and segment paths."
-        )
+        raise RuntimeError("No valid samples parsed from index file.")
 
-    ds = FrameWindowDataset(specs, args.pseudo_root, strict=args.strict)
+    ds = FrameWindowDataset(
+        specs,
+        args.pseudo_root,
+        strict=args.strict,
+        roi_enable=args.roi_enable,
+        roi_ref_w=args.roi_ref_w,
+        roi_ref_h=args.roi_ref_h,
+        roi_x0=args.roi_x0,
+        roi_y0=args.roi_y0,
+        roi_x1=args.roi_x1,
+        roi_y1=args.roi_y1,
+        visi_thr=args.visi_thr,
+        hard_neg_ratio=args.hard_neg_ratio,
+    )
     dl = DataLoader(ds, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, collate_fn=kd_collate, pin_memory=True)
 
     use_cuda = torch.cuda.is_available()
@@ -107,13 +130,23 @@ def main() -> None:
             x = batch["x"].to(device, non_blocking=True)
             hm_t = batch["hm_t"].to(device, non_blocking=True)
             score = batch["score"].to(device, non_blocking=True)
+            visi = batch["visi"].to(device, non_blocking=True)
 
             opt.zero_grad(set_to_none=True)
             amp_ctx = torch.amp.autocast(device_type="cuda", enabled=True) if (args.amp and use_cuda) else nullcontext()
             with amp_ctx:
                 out_d = model(x, return_logits=True, return_params=False)
                 decoder = model.module.decoder if isinstance(model, torch.nn.DataParallel) else model.decoder
-                loss, d = kd_total_loss(out_d["logits"], hm_t, score, decoder)
+                loss, d = kd_total_loss(
+                    out_d["logits"],
+                    hm_t,
+                    score,
+                    decoder,
+                    visi_t=visi,
+                    visi_logit_s=out_d["visi_logit"],
+                    neg_hm_scale=args.neg_hm_scale,
+                    e=args.vis_loss_w,
+                )
             scaler.scale(loss).backward()
             scaler.step(opt)
             scaler.update()
@@ -129,8 +162,12 @@ def main() -> None:
                     "l_mu": float(d["l_mu"]),
                     "l_sigma": float(d["l_sigma"]),
                     "l_grad": float(d["l_grad"]),
+                    "l_vis": float(d["l_vis"]),
+                    "visi_acc": float(d["visi_acc"]),
                     "mu_err_px": float(d["mu_err_px"]),
+                    "mu_err_px_visible": float(d["mu_err_px_visible"]),
                     "mean_score": float(batch["score"].mean().item()),
+                    "mean_visi": float(batch["visi"].mean().item()),
                     "mean_score_raw": float(torch.nan_to_num(batch["score_raw"], nan=0.0).mean().item()),
                     "bad_npz_count": len(ds.badcases["missing_npz"]),
                 }
@@ -147,9 +184,6 @@ def main() -> None:
 
     write_lines(bad_dir / "missing_npz.txt", ds.badcases["missing_npz"])
     write_lines(bad_dir / "missing_frames.txt", ds.badcases["missing_frames"])
-    total_bad = len(ds.badcases["missing_npz"]) + len(ds.badcases["missing_frames"])
-    if len(ds) > 0 and total_bad / max(1, len(ds)) > 0.2:
-        logger.warning("Bad sample ratio > 20%%")
 
 
 if __name__ == "__main__":

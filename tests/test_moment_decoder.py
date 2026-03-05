@@ -42,3 +42,14 @@ def test_moment_decoder_state_dict_roundtrip() -> None:
 
     assert torch.equal(other.grid_x, dec.grid_x)
     assert torch.equal(other.grid_y, dec.grid_y)
+
+
+from src.models.student_net import StudentNet
+
+
+def test_student_net_visi_head_output() -> None:
+    m = StudentNet().eval()
+    x = torch.randn(2, 9, 288, 512)
+    out = m(x, return_logits=True, return_params=False)
+    assert out["visi_logit"].shape == (2, 1)
+    assert out["visi_prob"].shape == (2, 1)

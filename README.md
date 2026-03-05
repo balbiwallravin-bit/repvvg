@@ -47,3 +47,18 @@ python tools/visualize_training_heatmaps.py \
 ```
 
 Each image is `[t-1 | t | t+1 | raw_heatmap | overlay]`.
+
+
+## Retrain with ROI-only + Visibility + Hard Negatives
+
+```bash
+python -m src.train   --index /home/lht/blurtrack/video_maked/index_train_ready.jsonl   --ready_root /home/lht/blurtrack/video_maked_ready   --pseudo_root /home/lht/blurtrack/pseudo/heatmaps   --out_dir /home/lht/blurtrack/outputs/run_roi_visi   --batch_size 64 --epochs 50 --lr 3e-4 --amp 1 --num_workers 8   --roi_enable 1 --roi_ref_w 1920 --roi_ref_h 1080   --roi_x0 367 --roi_y0 100 --roi_x1 1760 --roi_y1 884   --visi_thr 0.25 --hard_neg_ratio 0.2 --neg_hm_scale 0.1 --vis_loss_w 1.0
+```
+
+## Evaluate visible/no-ball split
+
+```bash
+python -m src.eval   --index /home/lht/blurtrack/video_maked/index_train_ready.jsonl   --ready_root /home/lht/blurtrack/video_maked_ready   --pseudo_root /home/lht/blurtrack/pseudo/heatmaps   --ckpt /home/lht/blurtrack/outputs/run_roi_visi/checkpoints/best.pt   --batch_size 16 --max_batches 200 --log_every 20   --roi_enable 1 --roi_ref_w 1920 --roi_ref_h 1080   --roi_x0 367 --roi_y0 100 --roi_x1 1760 --roi_y1 884   --visi_thr 0.25 --vis_conf_thr 0.5
+```
+
+Eval output includes `fp_rate`, `fn_rate`, and `mu_err_px_visible`.

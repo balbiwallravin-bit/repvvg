@@ -19,6 +19,13 @@ class StudentNet(nn.Module):
         self.d2 = RepVGGBlock(base * 4 + base * 2, base * 2)
         self.d1 = RepVGGBlock(base * 2 + base, base)
         self.head = nn.Conv2d(base, 1, 1)
+        self.visi_head = nn.Sequential(
+            nn.AdaptiveAvgPool2d((1, 1)),
+            nn.Flatten(),
+            nn.Linear(base * 4, base),
+            nn.ReLU(inplace=True),
+            nn.Linear(base, 1),
+        )
         self.decoder = MomentDecoder()
 
     def forward(self, x: torch.Tensor, return_logits: bool = True, return_params: bool = True) -> dict[str, torch.Tensor]:
@@ -26,6 +33,9 @@ class StudentNet(nn.Module):
         f2 = self.e2(f1)
         f3 = self.e3(f2)
         b = self.bottleneck(f3)
+
+        visi_logit = self.visi_head(b)
+
         u2 = F.interpolate(b, scale_factor=2.0, mode="bilinear", align_corners=False)
         u2 = self.d2(torch.cat([u2, f2], dim=1))
         u1 = F.interpolate(u2, scale_factor=2.0, mode="bilinear", align_corners=False)
@@ -33,7 +43,10 @@ class StudentNet(nn.Module):
         logits_full = self.head(u1)
         logits = F.interpolate(logits_full, size=(72, 128), mode="bilinear", align_corners=False)
 
-        out: dict[str, torch.Tensor] = {}
+        out: dict[str, torch.Tensor] = {
+            "visi_logit": visi_logit,
+            "visi_prob": torch.sigmoid(visi_logit),
+        }
         if return_logits:
             out["logits"] = logits
         if return_params:
