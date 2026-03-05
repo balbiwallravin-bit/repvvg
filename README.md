@@ -65,3 +65,6 @@ Eval output includes `fp_rate`, `fn_rate`, and `mu_err_px_visible`.
 
 
 The `--ckpt` argument accepts either a checkpoint file or a run directory (auto-tries `checkpoints/best.pt` then `checkpoints/last.pt`).
+
+
+If eval says checkpoints directory is empty, it means no `.pt` was produced yet (often training stopped too early). Re-run training and wait for at least one epoch end, or update to this version where `last.pt` is written at train start.

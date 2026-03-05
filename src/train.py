@@ -121,6 +121,11 @@ def main() -> None:
         best = st.get("best", best)
 
     global_step = 0
+
+    # write an initial checkpoint so eval has a recoverable file even if training is interrupted early
+    init_state = model.module.state_dict() if isinstance(model, torch.nn.DataParallel) else model.state_dict()
+    torch.save({"model": init_state, "opt": opt.state_dict(), "epoch": start_epoch - 1, "best": best}, ckpt_dir / "last.pt")
+
     for ep in range(start_epoch, args.epochs):
         model.train()
         pbar = tqdm(dl, desc=f"epoch {ep}")

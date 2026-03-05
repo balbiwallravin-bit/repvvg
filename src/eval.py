@@ -5,6 +5,7 @@ import argparse
 from pathlib import Path
 from typing import Any
 
+
 import torch
 from torch.utils.data import DataLoader
 
@@ -27,7 +28,19 @@ def _resolve_ckpt_path(ckpt_arg: str) -> Path:
             tried.append(c)
             if c.is_file():
                 return c
-        raise FileNotFoundError(f"No checkpoint found under directory: {p}; tried: {[str(x) for x in tried]}")
+
+        # fallback: any .pt under run dir (newest first), supports custom names
+        all_pts = sorted((x for x in p.rglob("*.pt") if x.is_file()), key=lambda x: x.stat().st_mtime, reverse=True)
+        if all_pts:
+            return all_pts[0]
+
+        ckpt_dir = p / "checkpoints"
+        extra = ""
+        if ckpt_dir.exists() and not any(ckpt_dir.iterdir()):
+            extra = " The checkpoints directory exists but is empty; training may not have completed an epoch or was interrupted before checkpoint save."
+        raise FileNotFoundError(
+            f"No checkpoint found under directory: {p}; tried: {[str(x) for x in tried]}." + extra
+        )
 
     # File path not found: try sibling last.pt fallback for best.pt typo/absence
     tried.append(p)
