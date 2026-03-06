@@ -11,6 +11,8 @@ import argparse
 import random
 import cv2
 import numpy as np
+from typing import Any
+
 import torch
 
 from src.datasets.frame_window_dataset import FrameWindowDataset
@@ -35,9 +37,15 @@ def main() -> None:
     if item is None:
         raise RuntimeError("selected sample invalid")
 
+    def _load_ckpt(path: str) -> dict[str, Any]:
+        try:
+            return torch.load(path, map_location="cpu", weights_only=True)
+        except TypeError:
+            return torch.load(path, map_location="cpu")
+
     model = StudentNet().eval()
     if args.ckpt:
-        model.load_state_dict(torch.load(args.ckpt, map_location="cpu")["model"])
+        model.load_state_dict(_load_ckpt(args.ckpt)["model"])
     with torch.no_grad():
         out = model(item["x"].unsqueeze(0))
     hm_s = out["prob"][0, 0].numpy()
@@ -48,7 +56,9 @@ def main() -> None:
     strip = np.concatenate(frames, axis=1)
 
     def heat_overlay(base: np.ndarray, hm: np.ndarray) -> np.ndarray:
-        hm_up = cv2.resize(hm, (512, 288))
+        # Some pseudo labels are float16; OpenCV resize may fail for that dtype.
+        hm = np.ascontiguousarray(hm, dtype=np.float32)
+        hm_up = cv2.resize(hm, (512, 288), interpolation=cv2.INTER_LINEAR)
         color = cv2.applyColorMap((np.clip(hm_up, 0, 1) * 255).astype(np.uint8), cv2.COLORMAP_JET)
         return cv2.addWeighted(base, 0.6, cv2.cvtColor(color, cv2.COLOR_BGR2RGB), 0.4, 0)
 

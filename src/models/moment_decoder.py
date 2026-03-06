@@ -15,8 +15,10 @@ class MomentDecoder(nn.Module):
         self.k_len = k_len
         self.eps = eps
         gy, gx = torch.meshgrid(torch.arange(h, dtype=torch.float32), torch.arange(w, dtype=torch.float32), indexing="ij")
-        self.register_buffer("grid_x", gx[None, None])
-        self.register_buffer("grid_y", gy[None, None])
+        # meshgrid outputs expanded views with overlapping memory. Clone to ensure
+        # load_state_dict can copy checkpoint tensors into these buffers safely.
+        self.register_buffer("grid_x", gx[None, None].clone())
+        self.register_buffer("grid_y", gy[None, None].clone())
 
     def prob(self, logits: torch.Tensor) -> torch.Tensor:
         h = torch.sigmoid(logits)
