@@ -86,3 +86,14 @@ CUDA_VISIBLE_DEVICES=4,5,6 torchrun --nproc_per_node=3 tools/train_torchrun.py \
 
 
 When using torchrun, `--batch_size` is **per-process** (per GPU). With 3 GPUs, global batch is `3 * batch_size`. If OOM appears, reduce `--batch_size` (e.g. 16 or 8) first.
+
+
+## Training report (full summary)
+
+```bash
+python tools/report_training.py   --metrics /home/lht/blurtrack/outputs/run_roi_visi/metrics.jsonl   --out_dir /home/lht/blurtrack/outputs/run_roi_visi/reports   --name run_roi_visi
+```
+
+This generates:
+- `/home/lht/blurtrack/outputs/run_roi_visi/reports/run_roi_visi.md`
+- `/home/lht/blurtrack/outputs/run_roi_visi/reports/run_roi_visi.summary.json`
