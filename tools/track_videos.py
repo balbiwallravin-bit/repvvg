@@ -30,6 +30,37 @@ def _load_ckpt(path: str) -> dict[str, Any]:
         return torch.load(path, map_location="cpu")
 
 
+
+
+def _resolve_ckpt_path(ckpt_arg: str) -> Path:
+    p = Path(ckpt_arg)
+    tried: list[Path] = []
+
+    if p.is_file():
+        return p
+
+    if p.is_dir():
+        cands = [p / "checkpoints" / "best.pt", p / "checkpoints" / "last.pt", p / "best.pt", p / "last.pt"]
+        for c in cands:
+            tried.append(c)
+            if c.is_file():
+                return c
+
+        all_pts = sorted((x for x in p.rglob("*.pt") if x.is_file()), key=lambda x: x.stat().st_mtime, reverse=True)
+        if all_pts:
+            return all_pts[0]
+
+        raise FileNotFoundError(f"No checkpoint found under directory: {p}; tried: {[str(x) for x in tried]}")
+
+    tried.append(p)
+    if p.name == "best.pt":
+        fallback = p.with_name("last.pt")
+        tried.append(fallback)
+        if fallback.is_file():
+            return fallback
+
+    raise FileNotFoundError(f"Checkpoint not found: {p}; tried: {[str(x) for x in tried]}")
+
 def _parse_start_ts(video_name: str) -> str:
     m = re.search(r"_S(\d{14})_", video_name)
     if not m:
@@ -215,7 +246,9 @@ def track_one_video(
     writer = cv2.VideoWriter(str(out_path), fourcc, fps, (w, h))
 
     model = StudentNet().to(device).eval()
-    model.load_state_dict(_load_ckpt(str(ckpt_path))["model"])
+    resolved_ckpt = _resolve_ckpt_path(str(ckpt_path))
+    print({"ckpt": str(resolved_ckpt)})
+    model.load_state_dict(_load_ckpt(str(resolved_ckpt))["model"])
 
     frames: list[np.ndarray] = []
     while True:
@@ -284,7 +317,7 @@ def track_one_video(
 def main() -> None:
     ap = argparse.ArgumentParser(description="Run StudentNet tracking on videos and export tracked videos.")
     ap.add_argument("--videos", nargs="+", required=True, help="input video paths")
-    ap.add_argument("--ckpt", required=True, help="checkpoint path")
+    ap.add_argument("--ckpt", required=True, help="checkpoint file or run directory")
     ap.add_argument("--out_root", default="/home/lht/blurtrack/outputs", help="output root")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--log_every", type=int, default=30)
